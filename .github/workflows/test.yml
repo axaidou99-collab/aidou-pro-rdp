@@ -9,24 +9,19 @@ on:
         type: choice
         default: ubuntu-24.04
         options:
-          # Linux x64
           - ubuntu-latest
           - ubuntu-24.04
           - ubuntu-22.04
           - ubuntu-26.04
-          # Linux arm64
           - ubuntu-24.04-arm
           - ubuntu-22.04-arm
           - ubuntu-26.04-arm
-          # Windows x64
           - windows-latest
           - windows-2025
           - windows-2025-vs2026
           - windows-2022
-          # macOS Intel
           - macos-15-intel
           - macos-26-intel
-          # macOS arm64 (M1)
           - macos-latest
           - macos-15
           - macos-26
@@ -36,18 +31,12 @@ jobs:
   desktop:
     runs-on: ${{ inputs.os }}
     timeout-minutes: 350
-    env:
-      VNC_PASS: ${{ secrets.VNC_PASSWORD }}
     defaults:
       run:
         shell: bash
 
     steps:
-      - name: Check password
-        run: |
-          [ ${#VNC_PASS} -ge 6 ] || { echo "أضف secret باسم VNC_PASSWORD (8 أحرف)"; exit 1; }
-
-      # ---------- Linux: سطح مكتب XFCE + TigerVNC ----------
+      # ---------- Linux: XFCE + TigerVNC بدون كلمة مرور ----------
       - name: Setup VNC (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -55,32 +44,33 @@ jobs:
           sudo apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 \
             tigervnc-standalone-server tigervnc-common websockify
           mkdir -p ~/.vnc
-          echo "$VNC_PASS" | vncpasswd -f > ~/.vnc/passwd
-          chmod 600 ~/.vnc/passwd
           printf '#!/bin/sh\nexport XDG_SESSION_TYPE=x11\nstartxfce4 &\n' > ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
-          vncserver :1 -geometry 1280x720 -localhost yes
+          vncserver :1 -geometry 1280x720 -localhost yes -SecurityTypes None --I-KNOW-THIS-IS-INSECURE
           echo "VNC_PORT=5901" >> $GITHUB_ENV
+          echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
 
-      # ---------- macOS: Screen Sharing المدمج ----------
+      # ---------- macOS: macOS يفرض كلمة مرور، فنحطها داخلياً ونرسلها تلقائياً في الرابط ----------
       - name: Setup VNC (macOS)
         if: runner.os == 'macOS'
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw "$VNC_PASS" \
+            -clientopts -setvncpw -vncpw 'vnc12345' \
             -restart -agent -privs -all
           (pip3 install websockify --break-system-packages || brew install websockify)
           echo "VNC_PORT=5900" >> $GITHUB_ENV
+          echo "URL_PARAMS=?autoconnect=true&resize=scale&password=vnc12345" >> $GITHUB_ENV
 
-      # ---------- Windows: TightVNC ----------
+      # ---------- Windows: TightVNC بدون مصادقة ----------
       - name: Setup VNC (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install tightvnc -y --installarguments "SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=$VNC_PASS SET_VIEWONLYPASSWORD=0"
+          choco install tightvnc -y --installarguments "SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=0 SET_ACCEPTHTTPCONNECTIONS=1 VALUE_OF_ACCEPTHTTPCONNECTIONS=0"
           pip install websockify
           echo "VNC_PORT=5900" >> $GITHUB_ENV
+          echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
 
       # ---------- noVNC + cloudflared + الرابط ----------
       - name: Start noVNC and Cloudflare tunnel
@@ -116,7 +106,7 @@ jobs:
           done
           echo "========================================"
           echo "الصورة: ${{ inputs.os }}"
-          echo "الرابط: $URL/vnc.html"
+          echo "الرابط: $URL/vnc.html$URL_PARAMS"
           echo "========================================"
           [ -z "$URL" ] && { cat cf.log; cat ws.log; exit 1; }
           sleep 20000
