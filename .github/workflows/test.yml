@@ -1,5 +1,7 @@
+Remote desktop
+ · YML
 name: Remote Desktop (choose runner)
-
+ 
 on:
   workflow_dispatch:
     inputs:
@@ -9,24 +11,29 @@ on:
         type: choice
         default: ubuntu-24.04
         options:
+          # Linux x64
           - ubuntu-latest
           - ubuntu-24.04
           - ubuntu-22.04
           - ubuntu-26.04
+          # Linux arm64
           - ubuntu-24.04-arm
           - ubuntu-22.04-arm
           - ubuntu-26.04-arm
+          # Windows x64
           - windows-latest
           - windows-2025
           - windows-2025-vs2026
           - windows-2022
+          # macOS Intel
           - macos-15-intel
           - macos-26-intel
+          # macOS arm64 (M1)
           - macos-latest
           - macos-15
           - macos-26
           - xcode-27
-
+ 
 jobs:
   desktop:
     runs-on: ${{ inputs.os }}
@@ -34,7 +41,7 @@ jobs:
     defaults:
       run:
         shell: bash
-
+ 
     steps:
       # ---------- Linux: XFCE + TigerVNC بدون كلمة مرور ----------
       - name: Setup VNC (Linux)
@@ -42,27 +49,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 \
-            tigervnc-standalone-server tigervnc-common websockify
+            tigervnc-standalone-server tigervnc-common websockify python3-websockify
           mkdir -p ~/.vnc
           printf '#!/bin/sh\nexport XDG_SESSION_TYPE=x11\nstartxfce4 &\n' > ~/.vnc/xstartup
           chmod +x ~/.vnc/xstartup
           vncserver :1 -geometry 1280x720 -localhost yes -SecurityTypes None --I-KNOW-THIS-IS-INSECURE
           echo "VNC_PORT=5901" >> $GITHUB_ENV
           echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
-
-      # ---------- macOS: macOS يفرض كلمة مرور، فنحطها داخلياً ونرسلها تلقائياً في الرابط ----------
+ 
+      # ---------- macOS: يفرض كلمة مرور، نضعها عشوائية ونمررها تلقائياً في الرابط ----------
       - name: Setup VNC (macOS)
         if: runner.os == 'macOS'
         run: |
+          PASS=$(openssl rand -hex 4)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw 'vnc12345' \
+            -clientopts -setvncpw -vncpw "$PASS" \
             -restart -agent -privs -all
-          (pip3 install websockify --break-system-packages || brew install websockify)
+          pip3 install websockify --break-system-packages || pip3 install websockify
           echo "VNC_PORT=5900" >> $GITHUB_ENV
-          echo "URL_PARAMS=?autoconnect=true&resize=scale&password=vnc12345" >> $GITHUB_ENV
-
+          echo "URL_PARAMS=?autoconnect=true&resize=scale&password=$PASS" >> $GITHUB_ENV
+ 
       # ---------- Windows: TightVNC بدون مصادقة ----------
       - name: Setup VNC (Windows)
         if: runner.os == 'Windows'
@@ -71,12 +79,13 @@ jobs:
           pip install websockify
           echo "VNC_PORT=5900" >> $GITHUB_ENV
           echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
-
-            - name: Start noVNC and Cloudflare tunnel
+ 
+      # ---------- noVNC + cloudflared + الرابط ----------
+      - name: Start noVNC and Cloudflare tunnel
         run: |
           set +e
           git clone --depth 1 https://github.com/novnc/noVNC.git novnc
-
+ 
           BASE="https://github.com/cloudflare/cloudflared/releases/latest/download"
           if [ "$RUNNER_OS" = "Linux" ]; then
             [ "$RUNNER_ARCH" = "ARM64" ] && F=cloudflared-linux-arm64 || F=cloudflared-linux-amd64
@@ -93,25 +102,28 @@ jobs:
             curl -fsSL "$BASE/cloudflared-windows-amd64.exe" -o cloudflared.exe
             CF=./cloudflared.exe
           fi
-
+ 
           PY=$(command -v python3 || command -v python)
           nohup $PY -m websockify --web ./novnc 6080 localhost:$VNC_PORT > ws.log 2>&1 &
           sleep 3
           nohup $CF tunnel --url http://localhost:6080 > cf.log 2>&1 &
-
+ 
           URL=""
           for i in $(seq 1 40); do
             URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cf.log | head -n 1 || true)
             [ -n "$URL" ] && break
             sleep 2
           done
+ 
           echo "========================================"
           echo "الصورة: ${{ inputs.os }}"
           echo "الرابط: $URL/vnc.html$URL_PARAMS"
           echo "========================================"
+ 
           if [ -z "$URL" ]; then
             echo "--- cf.log ---"; cat cf.log
             echo "--- ws.log ---"; cat ws.log
             exit 1
           fi
           sleep 20000
+ 
