@@ -72,9 +72,9 @@ jobs:
           echo "VNC_PORT=5900" >> $GITHUB_ENV
           echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
 
-      # ---------- noVNC + cloudflared + الرابط ----------
-      - name: Start noVNC and Cloudflare tunnel
+            - name: Start noVNC and Cloudflare tunnel
         run: |
+          set +e
           git clone --depth 1 https://github.com/novnc/noVNC.git novnc
 
           BASE="https://github.com/cloudflare/cloudflared/releases/latest/download"
@@ -94,13 +94,14 @@ jobs:
             CF=./cloudflared.exe
           fi
 
-          nohup websockify --web ./novnc 6080 localhost:$VNC_PORT > ws.log 2>&1 &
+          PY=$(command -v python3 || command -v python)
+          nohup $PY -m websockify --web ./novnc 6080 localhost:$VNC_PORT > ws.log 2>&1 &
           sleep 3
           nohup $CF tunnel --url http://localhost:6080 > cf.log 2>&1 &
 
           URL=""
           for i in $(seq 1 40); do
-            URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cf.log | head -n 1)
+            URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cf.log | head -n 1 || true)
             [ -n "$URL" ] && break
             sleep 2
           done
@@ -108,5 +109,9 @@ jobs:
           echo "الصورة: ${{ inputs.os }}"
           echo "الرابط: $URL/vnc.html$URL_PARAMS"
           echo "========================================"
-          [ -z "$URL" ] && { cat cf.log; cat ws.log; exit 1; }
+          if [ -z "$URL" ]; then
+            echo "--- cf.log ---"; cat cf.log
+            echo "--- ws.log ---"; cat ws.log
+            exit 1
+          fi
           sleep 20000
