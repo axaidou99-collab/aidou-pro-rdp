@@ -35,7 +35,7 @@ jobs:
       # 3. فتح رابط المتصفح (VNC على المنفذ 8006)
       - name: Expose VNC to Browser
         run: |
-          wget -q "hhttps://github.com/cloudflare/cloudflared/releases/download/2026.11.2/cloudflared-linux-amd64" -O cf
+          wget -q "https://github.com/cloudflare/cloudflared/releases/download/2026.11.2/cloudflared-linux-amd64" -O cf
           chmod +x cf
           ./cf tunnel --url http://localhost:8006 > cf.log 2>&1 &
           sleep 6
