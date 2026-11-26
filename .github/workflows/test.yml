@@ -1,0 +1,46 @@
+name: Run macOS 14 on GitHub Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos-vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      # 1. تفريغ مساحة كافية على القرص لنظام macOS 14
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo mkdir -p /mnt/macos
+          sudo chmod 777 /mnt/macos
+
+      # 2. تشغيل أمر dockurr/macos معدّلاً لبيئة GitHub Runner
+      - name: Start macOS 14 Container
+        run: |
+          docker run -d --rm --name macos \
+            -e "VERSION=14" \
+            -e "RAM_SIZE=10G" \
+            -e "CPU_CORES=4" \
+            -e "DISK_SIZE=45G" \
+            -p 8006:8006 \
+            --device=/dev/kvm \
+            --device=/dev/net/tun \
+            --cap-add NET_ADMIN \
+            -v "/mnt/macos:/storage" \
+            --stop-timeout 120 \
+            docker.io/dockurr/macos
+
+      # 3. فتح رابط المتصفح (VNC على المنفذ 8006)
+      - name: Expose VNC to Browser
+        run: |
+          wget -q "https://github.com" -O cf
+          chmod +x cf
+          ./cf tunnel --url http://localhost:8006 > cf.log 2>&1 &
+          sleep 6
+          echo "========================================================"
+          echo "افتح الرابط في متصفحك لمشاهدة تثبيت وتشغيل macOS 14:"
+          grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cf.log | head -n 1
+          echo "========================================================"
+          sleep 20000
