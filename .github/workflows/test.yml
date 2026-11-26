@@ -1,46 +1,122 @@
-name: Run macOS 14 on GitHub Runner
+name: Remote Desktop (choose runner)
 
 on:
   workflow_dispatch:
+    inputs:
+      os:
+        description: "اختر الصورة"
+        required: true
+        type: choice
+        default: ubuntu-24.04
+        options:
+          # Linux x64
+          - ubuntu-latest
+          - ubuntu-24.04
+          - ubuntu-22.04
+          - ubuntu-26.04
+          # Linux arm64
+          - ubuntu-24.04-arm
+          - ubuntu-22.04-arm
+          - ubuntu-26.04-arm
+          # Windows x64
+          - windows-latest
+          - windows-2025
+          - windows-2025-vs2026
+          - windows-2022
+          # macOS Intel
+          - macos-15-intel
+          - macos-26-intel
+          # macOS arm64 (M1)
+          - macos-latest
+          - macos-15
+          - macos-26
+          - xcode-27
 
 jobs:
-  macos-vm:
-    runs-on: ubuntu-24.04
+  desktop:
+    runs-on: ${{ inputs.os }}
     timeout-minutes: 350
+    env:
+      VNC_PASS: ${{ secrets.VNC_PASSWORD }}
+    defaults:
+      run:
+        shell: bash
 
     steps:
-      # 1. تفريغ مساحة كافية على القرص لنظام macOS 14
-      - name: Free Disk Space
+      - name: Check password
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo mkdir -p /mnt/macos
-          sudo chmod 777 /mnt/macos
+          [ ${#VNC_PASS} -ge 6 ] || { echo "أضف secret باسم VNC_PASSWORD (8 أحرف)"; exit 1; }
 
-      # 2. تشغيل أمر dockurr/macos معدّلاً لبيئة GitHub Runner
-      - name: Start macOS 14 Container
+      # ---------- Linux: سطح مكتب XFCE + TigerVNC ----------
+      - name: Setup VNC (Linux)
+        if: runner.os == 'Linux'
         run: |
-          docker run -d --rm --name macos \
-            -e "VERSION=14" \
-            -e "RAM_SIZE=10G" \
-            -e "CPU_CORES=4" \
-            -e "DISK_SIZE=45G" \
-            -p 8006:8006 \
-            --device=/dev/kvm \
-            --device=/dev/net/tun \
-            --cap-add NET_ADMIN \
-            -v "/mnt/macos:/storage" \
-            --stop-timeout 120 \
-            docker.io/dockurr/macos
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 \
+            tigervnc-standalone-server tigervnc-common websockify
+          mkdir -p ~/.vnc
+          echo "$VNC_PASS" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          printf '#!/bin/sh\nexport XDG_SESSION_TYPE=x11\nstartxfce4 &\n' > ~/.vnc/xstartup
+          chmod +x ~/.vnc/xstartup
+          vncserver :1 -geometry 1280x720 -localhost yes
+          echo "VNC_PORT=5901" >> $GITHUB_ENV
 
-      # 3. فتح رابط المتصفح (VNC على المنفذ 8006)
-      - name: Expose VNC to Browser
+      # ---------- macOS: Screen Sharing المدمج ----------
+      - name: Setup VNC (macOS)
+        if: runner.os == 'macOS'
         run: |
-          wget -q "https://github.com/cloudflare/cloudflared/releases/download/2026.11.2/cloudflared-linux-amd64" -O cf
-          chmod +x cf
-          ./cf tunnel --url http://localhost:8006 > cf.log 2>&1 &
-          sleep 6
-          echo "========================================================"
-          echo "افتح الرابط في متصفحك لمشاهدة تثبيت وتشغيل macOS 14:"
-          grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cf.log | head -n 1
-          echo "========================================================"
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw "$VNC_PASS" \
+            -restart -agent -privs -all
+          (pip3 install websockify --break-system-packages || brew install websockify)
+          echo "VNC_PORT=5900" >> $GITHUB_ENV
+
+      # ---------- Windows: TightVNC ----------
+      - name: Setup VNC (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install tightvnc -y --installarguments "SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=$VNC_PASS SET_VIEWONLYPASSWORD=0"
+          pip install websockify
+          echo "VNC_PORT=5900" >> $GITHUB_ENV
+
+      # ---------- noVNC + cloudflared + الرابط ----------
+      - name: Start noVNC and Cloudflare tunnel
+        run: |
+          git clone --depth 1 https://github.com/novnc/noVNC.git novnc
+
+          BASE="https://github.com/cloudflare/cloudflared/releases/latest/download"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            [ "$RUNNER_ARCH" = "ARM64" ] && F=cloudflared-linux-arm64 || F=cloudflared-linux-amd64
+            curl -fsSL "$BASE/$F" -o cloudflared
+            chmod +x cloudflared
+            CF=./cloudflared
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            [ "$RUNNER_ARCH" = "ARM64" ] && F=cloudflared-darwin-arm64.tgz || F=cloudflared-darwin-amd64.tgz
+            curl -fsSL "$BASE/$F" -o cf.tgz
+            tar xzf cf.tgz
+            chmod +x cloudflared
+            CF=./cloudflared
+          else
+            curl -fsSL "$BASE/cloudflared-windows-amd64.exe" -o cloudflared.exe
+            CF=./cloudflared.exe
+          fi
+
+          nohup websockify --web ./novnc 6080 localhost:$VNC_PORT > ws.log 2>&1 &
+          sleep 3
+          nohup $CF tunnel --url http://localhost:6080 > cf.log 2>&1 &
+
+          URL=""
+          for i in $(seq 1 40); do
+            URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cf.log | head -n 1)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          echo "========================================"
+          echo "الصورة: ${{ inputs.os }}"
+          echo "الرابط: $URL/vnc.html"
+          echo "========================================"
+          [ -z "$URL" ] && { cat cf.log; cat ws.log; exit 1; }
           sleep 20000
