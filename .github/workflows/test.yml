@@ -117,6 +117,7 @@ jobs:
           echo "========================================"
           echo "الصورة: ${{ inputs.os }}"
           echo "الرابط: $URL/vnc.html$URL_PARAMS"
+          echo "كلمة المرور: $(echo "$URL_PARAMS" | sed 's/.*password=//' | sed 's/./& /g')"
           echo "========================================"
  
           if [ -z "$URL" ]; then
