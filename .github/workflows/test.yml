@@ -1,6 +1,5 @@
-
 name: Remote Desktop (choose runner)
- 
+
 on:
   workflow_dispatch:
     inputs:
@@ -32,7 +31,7 @@ on:
           - macos-15
           - macos-26
           - xcode-27
- 
+
 jobs:
   desktop:
     runs-on: ${{ inputs.os }}
@@ -40,7 +39,7 @@ jobs:
     defaults:
       run:
         shell: bash
- 
+
     steps:
       # ---------- Linux: XFCE + TigerVNC بدون كلمة مرور ----------
       - name: Setup VNC (Linux)
@@ -55,23 +54,25 @@ jobs:
           vncserver :1 -geometry 1280x720 -localhost yes -SecurityTypes None --I-KNOW-THIS-IS-INSECURE
           echo "VNC_PORT=5901" >> $GITHUB_ENV
           echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
- 
-      # ---------- macOS: خليناها password ال password خليناها password ----------
+
+      # ---------- macOS: المستخدم user وكلمة المرور password ----------
       - name: Setup VNC (macOS)
         if: runner.os == 'macOS'
         run: |
           PASS=password
-          sudo dscl . -passwd /Users/runner "$PASS"
+          # إنشاء مستخدم اسمه user (لو فشل نكمل، لأن كلمة VNC لا تعتمد عليه)
+          sudo sysadminctl -addUser user -fullName "user" -password "$PASS" -admin \
+            || echo "تعذر إنشاء المستخدم user، نكمل"
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
-            -users runner -privs -all \
+            -allowAccessFor -allUsers -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw "$PASS" \
             -restart -agent
           pip3 install websockify --break-system-packages || pip3 install websockify
           echo "VNC_PORT=5900" >> $GITHUB_ENV
           echo "URL_PARAMS=?autoconnect=true&resize=scale&password=$PASS" >> $GITHUB_ENV
- 
+
       # ---------- Windows: TightVNC بدون مصادقة ----------
       - name: Setup VNC (Windows)
         if: runner.os == 'Windows'
@@ -80,13 +81,13 @@ jobs:
           pip install websockify
           echo "VNC_PORT=5900" >> $GITHUB_ENV
           echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
- 
-      # ---------- noVNC + cloudflared + الرابط ----------
+
+      # ---------- noVNC + cloudflared + الرابط (مع إعادة محاولة تلقائية) ----------
       - name: Start noVNC and Cloudflare tunnel
         run: |
           set +e
           git clone --depth 1 https://github.com/novnc/noVNC.git novnc
- 
+
           BASE="https://github.com/cloudflare/cloudflared/releases/latest/download"
           if [ "$RUNNER_OS" = "Linux" ]; then
             [ "$RUNNER_ARCH" = "ARM64" ] && F=cloudflared-linux-arm64 || F=cloudflared-linux-amd64
@@ -103,29 +104,64 @@ jobs:
             curl -fsSL "$BASE/cloudflared-windows-amd64.exe" -o cloudflared.exe
             CF=./cloudflared.exe
           fi
- 
+
           PY=$(command -v python3 || command -v python)
           nohup $PY -m websockify --web ./novnc 6080 localhost:$VNC_PORT > ws.log 2>&1 &
           sleep 3
-          nohup $CF tunnel --url http://localhost:6080 > cf.log 2>&1 &
- 
-          URL=""
-          for i in $(seq 1 40); do
-            URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cf.log | head -n 1 || true)
-            [ -n "$URL" ] && break
+
+          # تأكد أن noVNC يعمل محلياً قبل فتح النفق
+          for i in $(seq 1 15); do
+            curl -s -o /dev/null "http://localhost:6080/vnc.html" && break
             sleep 2
           done
- 
+
+          stop_tunnel() {
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              taskkill //F //IM cloudflared.exe > /dev/null 2>&1
+            else
+              [ -n "$CF_PID" ] && kill $CF_PID 2>/dev/null
+            fi
+          }
+
+          URL=""
+          OK=0
+          for attempt in 1 2 3 4 5; do
+            echo ">>> محاولة النفق رقم $attempt"
+            stop_tunnel
+            : > cf.log
+            nohup $CF tunnel --url http://localhost:6080 > cf.log 2>&1 &
+            CF_PID=$!
+
+            URL=""
+            for i in $(seq 1 30); do
+              URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cf.log | head -n 1 || true)
+              [ -n "$URL" ] && break
+              sleep 2
+            done
+            [ -z "$URL" ] && continue
+
+            # تحقق أن الرابط يستجيب فعلاً
+            for i in $(seq 1 20); do
+              CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL/vnc.html")
+              if [ "$CODE" = "200" ]; then OK=1; break; fi
+              sleep 3
+            done
+            [ "$OK" = "1" ] && break
+          done
+
           echo "========================================"
           echo "الصورة: ${{ inputs.os }}"
           echo "الرابط: $URL/vnc.html$URL_PARAMS"
-          echo "كلمة المرور: $(echo "$URL_PARAMS" | sed 's/.*password=//' | sed 's/./& /g')"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "المستخدم: user"
+            echo "كلمة المرور: password"
+          fi
+          [ "$OK" = "1" ] || echo "تنبيه: ما قدرت أتحقق من الرابط من داخل الـ runner، جرّبه وإن لم يفتح ألغِ التشغيل وأعده"
           echo "========================================"
- 
+
           if [ -z "$URL" ]; then
             echo "--- cf.log ---"; cat cf.log
             echo "--- ws.log ---"; cat ws.log
             exit 1
           fi
           sleep 20000
- 
