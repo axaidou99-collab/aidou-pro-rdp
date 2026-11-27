@@ -56,16 +56,18 @@ jobs:
           echo "VNC_PORT=5901" >> $GITHUB_ENV
           echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
  
-      # ---------- macOS: يفرض كلمة مرور، نضعها عشوائية ونمررها تلقائياً في الرابط ----------
+      # ---------- macOS: خليناها password ال password خليناها password ----------
       - name: Setup VNC (macOS)
         if: runner.os == 'macOS'
         run: |
           PASS=password
+          sudo dscl . -passwd /Users/runner "$PASS"
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
+            -users runner -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw "$PASS" \
-            -restart -agent -privs -all
+            -restart -agent
           pip3 install websockify --break-system-packages || pip3 install websockify
           echo "VNC_PORT=5900" >> $GITHUB_ENV
           echo "URL_PARAMS=?autoconnect=true&resize=scale&password=$PASS" >> $GITHUB_ENV
