@@ -1,6 +1,7 @@
 name: Remote Desktop (choose runner)
 
 on:
+  push:
   workflow_dispatch:
     inputs:
       os:
@@ -34,56 +35,117 @@ on:
 
 jobs:
   desktop:
-    runs-on: ${{ inputs.os }}
+    runs-on: ${{ inputs.os || 'ubuntu-24.04' }}
     timeout-minutes: 350
     defaults:
       run:
         shell: bash
 
     steps:
-      # ---------- Linux: XFCE + TigerVNC بدون كلمة مرور ----------
-      - name: Setup VNC (Linux)
+      # =====================================================
+      # Linux: XFCE + TigerVNC (password) + PulseAudio
+      # =====================================================
+      - name: Setup desktop and PulseAudio (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xfce4 xfce4-terminal dbus-x11 \
-            tigervnc-standalone-server tigervnc-common websockify python3-websockify
-          mkdir -p ~/.vnc
-          printf '#!/bin/sh\nexport XDG_SESSION_TYPE=x11\nstartxfce4 &\n' > ~/.vnc/xstartup
-          chmod +x ~/.vnc/xstartup
-          vncserver :1 -geometry 1280x720 -localhost yes -SecurityTypes None --I-KNOW-THIS-IS-INSECURE
-          echo "VNC_PORT=5901" >> $GITHUB_ENV
-          echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
+            tigervnc-standalone-server tigervnc-common python3-websockify \
+            pulseaudio pulseaudio-utils ffmpeg
 
-      # ---------- macOS: المستخدم user وكلمة المرور password ----------
-      - name: Setup VNC (macOS)
+          # PulseAudio: كرت صوت وهمي + socket يقدر يتصل فيه جلسة VNC
+          pulseaudio -D --exit-idle-time=-1 --disallow-exit || pulseaudio --start
+          sleep 2
+          pactl load-module module-null-sink sink_name=vnc sink_properties=device.description=vnc
+          pactl set-default-sink vnc
+          pactl load-module module-native-protocol-unix socket=/tmp/pulse-socket auth-anonymous=1
+          chmod 777 /tmp/pulse-socket || true
+
+          mkdir -p ~/.vnc
+          echo "password" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
+          cat > ~/.vnc/xstartup <<'EOF'
+          #!/bin/sh
+          export XDG_SESSION_TYPE=x11
+          export PULSE_SERVER=unix:/tmp/pulse-socket
+          startxfce4 &
+          EOF
+          chmod +x ~/.vnc/xstartup
+          vncserver :1 -geometry 1280x720 -localhost yes -SecurityTypes VncAuth
+
+          echo "VNC_PORT=5901" >> $GITHUB_ENV
+          echo "AUDIO_FMT=pulse" >> $GITHUB_ENV
+          echo "AUDIO_DEV=vnc.monitor" >> $GITHUB_ENV
+
+      # =====================================================
+      # macOS: مستخدم اسمه user + كلمة مرور password
+      # =====================================================
+      - name: Setup VNC and user (macOS)
         if: runner.os == 'macOS'
         run: |
+          set +e
           PASS=password
-          # إنشاء مستخدم اسمه user (لو فشل نكمل، لأن كلمة VNC لا تعتمد عليه)
-          sudo sysadminctl -addUser user -fullName "user" -password "$PASS" -admin \
-            || echo "تعذر إنشاء المستخدم user، نكمل"
+          sudo dscl . -create /Users/user
+          sudo dscl . -create /Users/user UserShell /bin/zsh
+          sudo dscl . -create /Users/user RealName "user"
+          sudo dscl . -create /Users/user UniqueID 599
+          sudo dscl . -create /Users/user PrimaryGroupID 20
+          sudo dscl . -create /Users/user NFSHomeDirectory /Users/user
+          sudo dscl . -passwd /Users/user "$PASS"
+          sudo dscl . -append /Groups/admin GroupMembership user
+          sudo mkdir -p /Users/user
+          sudo chown user:staff /Users/user
+
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
-            -allowAccessFor -allUsers -privs -all \
+            -users user -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw "$PASS" \
             -restart -agent
+
           pip3 install websockify --break-system-packages || pip3 install websockify
           echo "VNC_PORT=5900" >> $GITHUB_ENV
-          echo "URL_PARAMS=?autoconnect=true&resize=scale&password=$PASS" >> $GITHUB_ENV
 
-      # ---------- Windows: TightVNC بدون مصادقة ----------
+      # macOS لا يدعم PulseAudio أصلاً، فنستخدم BlackHole (كرت صوت وهمي) بدلاً منه
+      - name: Setup audio (macOS, BlackHole)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          brew install ffmpeg blackhole-2ch switchaudio-osx
+          sudo killall coreaudiod || true
+          sleep 3
+          SwitchAudioSource -s "BlackHole 2ch" || true
+          echo "AUDIO_FMT=avfoundation" >> $GITHUB_ENV
+          echo "AUDIO_DEV=:BlackHole 2ch" >> $GITHUB_ENV
+
+      # =====================================================
+      # Windows: TightVNC (password) + كرت صوت وهمي
+      # =====================================================
       - name: Setup VNC (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install tightvnc -y --installarguments "SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=0 SET_ACCEPTHTTPCONNECTIONS=1 VALUE_OF_ACCEPTHTTPCONNECTIONS=0"
+          choco install tightvnc -y --installarguments "SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=password SET_VIEWONLYPASSWORD=0 SET_ACCEPTHTTPCONNECTIONS=1 VALUE_OF_ACCEPTHTTPCONNECTIONS=0 SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1"
+          powershell -NoProfile -Command "New-ItemProperty -Path 'HKLM:\SOFTWARE\TightVNC\Server' -Name AllowLoopback -Value 1 -PropertyType DWord -Force; Restart-Service tvnserver" || true
           pip install websockify
           echo "VNC_PORT=5900" >> $GITHUB_ENV
-          echo "URL_PARAMS=?autoconnect=true&resize=scale" >> $GITHUB_ENV
 
-      # ---------- noVNC + cloudflared + الرابط (مع إعادة محاولة تلقائية) ----------
-      - name: Start noVNC and Cloudflare tunnel
+      - name: Setup audio (Windows, VB-Cable)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Set-Service audiosrv -StartupType Automatic
+          Start-Service audiosrv
+          choco install ffmpeg vb-cable -y
+          Install-Module AudioDeviceCmdlets -Force -Scope CurrentUser
+          Get-AudioDevice -List | Where-Object { $_.Name -like "CABLE Input*" -and $_.Type -eq "Playback" } | Set-AudioDevice
+          Add-Content $env:GITHUB_ENV "AUDIO_FMT=dshow"
+          Add-Content $env:GITHUB_ENV "AUDIO_DEV=audio=CABLE Output (VB-Audio Virtual Cable)"
+
+      # =====================================================
+      # noVNC + بث الصوت + Cloudflare
+      # =====================================================
+      - name: Start noVNC, audio stream and Cloudflare tunnels
         run: |
           set +e
           git clone --depth 1 https://github.com/novnc/noVNC.git novnc
@@ -106,57 +168,105 @@ jobs:
           fi
 
           PY=$(command -v python3 || command -v python)
+
+          # --- خادم بث الصوت (ffmpeg يلتقط الصوت ويرسله كـ mp3) ---
+          cat > audio.py <<'EOF'
+          import os, subprocess
+          from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+          FMT = os.environ.get("AUDIO_FMT", "")
+          DEV = os.environ.get("AUDIO_DEV", "")
+
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header("Content-Type", "audio/mpeg")
+                  self.send_header("Cache-Control", "no-store")
+                  self.send_header("Access-Control-Allow-Origin", "*")
+                  self.end_headers()
+                  p = subprocess.Popen(
+                      ["ffmpeg", "-loglevel", "error", "-fflags", "nobuffer",
+                       "-f", FMT, "-i", DEV, "-ac", "2", "-ar", "44100",
+                       "-c:a", "libmp3lame", "-b:a", "96k", "-flush_packets", "1",
+                       "-f", "mp3", "pipe:1"],
+                      stdout=subprocess.PIPE)
+                  try:
+                      while True:
+                          d = p.stdout.read(4096)
+                          if not d:
+                              break
+                          self.wfile.write(d)
+                          self.wfile.flush()
+                  except Exception:
+                      pass
+                  finally:
+                      p.kill()
+
+              def log_message(self, *a):
+                  pass
+
+          ThreadingHTTPServer(("0.0.0.0", 8000), H).serve_forever()
+          EOF
+
+          nohup $PY audio.py > audio.log 2>&1 &
           nohup $PY -m websockify --web ./novnc 6080 localhost:$VNC_PORT > ws.log 2>&1 &
           sleep 3
+          nohup $CF tunnel --url http://localhost:6080 > cf.log 2>&1 &
+          nohup $CF tunnel --url http://localhost:8000 > cfa.log 2>&1 &
 
-          # تأكد أن noVNC يعمل محلياً قبل فتح النفق
-          for i in $(seq 1 15); do
-            curl -s -o /dev/null "http://localhost:6080/vnc.html" && break
-            sleep 2
-          done
-
-          stop_tunnel() {
-            if [ "$RUNNER_OS" = "Windows" ]; then
-              taskkill //F //IM cloudflared.exe > /dev/null 2>&1
-            else
-              [ -n "$CF_PID" ] && kill $CF_PID 2>/dev/null
-            fi
-          }
-
-          URL=""
-          OK=0
-          for attempt in 1 2 3 4 5; do
-            echo ">>> محاولة النفق رقم $attempt"
-            stop_tunnel
-            : > cf.log
-            nohup $CF tunnel --url http://localhost:6080 > cf.log 2>&1 &
-            CF_PID=$!
-
-            URL=""
-            for i in $(seq 1 30); do
-              URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" cf.log | head -n 1 || true)
-              [ -n "$URL" ] && break
+          geturl() {
+            for i in $(seq 1 40); do
+              U=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" "$1" | head -n 1 || true)
+              [ -n "$U" ] && { echo "$U"; return; }
               sleep 2
             done
-            [ -z "$URL" ] && continue
+          }
+          URL=$(geturl cf.log)
+          AURL=$(geturl cfa.log)
 
-            # تحقق أن الرابط يستجيب فعلاً
-            for i in $(seq 1 20); do
-              CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL/vnc.html")
-              if [ "$CODE" = "200" ]; then OK=1; break; fi
-              sleep 3
-            done
-            [ "$OK" = "1" ] && break
-          done
+          # --- صفحة تجمع الشاشة + زر الصوت ---
+          cat > novnc/index.html <<'EOF'
+          <!doctype html>
+          <html>
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Remote Desktop</title>
+          <style>
+            html, body { margin: 0; height: 100%; background: #111; }
+            iframe { border: 0; width: 100%; height: 100%; }
+            #b { position: fixed; top: 8px; right: 8px; z-index: 9; padding: 8px 14px;
+                 border: 0; border-radius: 6px; background: #2a7; color: #fff; cursor: pointer; }
+          </style>
+          </head>
+          <body>
+          <button id="b">تشغيل الصوت</button>
+          <iframe src="vnc.html?autoconnect=true&resize=scale&password=password"></iframe>
+          <audio id="a"></audio>
+          <script>
+            var a = document.getElementById("a"), b = document.getElementById("b");
+            b.onclick = function () {
+              if (a.paused) {
+                a.src = "AUDIO_URL/stream.mp3?" + Date.now();
+                a.play();
+                b.textContent = "ايقاف الصوت";
+              } else {
+                a.pause();
+                a.removeAttribute("src");
+                a.load();
+                b.textContent = "تشغيل الصوت";
+              }
+            };
+          </script>
+          </body>
+          </html>
+          EOF
+          sed -i.bak "s#AUDIO_URL#$AURL#" novnc/index.html
 
           echo "========================================"
-          echo "الصورة: ${{ inputs.os }}"
-          echo "الرابط: $URL/vnc.html$URL_PARAMS"
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            echo "المستخدم: user"
-            echo "كلمة المرور: password"
-          fi
-          [ "$OK" = "1" ] || echo "تنبيه: ما قدرت أتحقق من الرابط من داخل الـ runner، جرّبه وإن لم يفتح ألغِ التشغيل وأعده"
+          echo "الصورة: ${{ inputs.os || 'ubuntu-24.04' }}"
+          echo "الرابط (شاشة + صوت): $URL/index.html"
+          echo "كلمة المرور: password   (في macOS المستخدم: user)"
           echo "========================================"
 
           if [ -z "$URL" ]; then
