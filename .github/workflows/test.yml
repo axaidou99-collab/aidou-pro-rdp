@@ -62,7 +62,8 @@ jobs:
           chmod 777 /tmp/pulse-socket || true
 
           mkdir -p ~/.vnc
-          echo "password" | vncpasswd -f > ~/.vnc/passwd
+          VNCPW=$(command -v vncpasswd || command -v tigervncpasswd || command -v /usr/bin/tigervncpasswd)
+          echo "password" | $VNCPW -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
           cat > ~/.vnc/xstartup <<'EOF'
           #!/bin/sh
@@ -71,7 +72,8 @@ jobs:
           startxfce4 &
           EOF
           chmod +x ~/.vnc/xstartup
-          vncserver :1 -geometry 1280x720 -localhost yes -SecurityTypes VncAuth
+          VNCSRV=$(command -v vncserver || command -v tigervncserver)
+          $VNCSRV :1 -geometry 1280x720 -localhost yes -SecurityTypes VncAuth
 
           echo "VNC_PORT=5901" >> $GITHUB_ENV
           echo "AUDIO_FMT=pulse" >> $GITHUB_ENV
